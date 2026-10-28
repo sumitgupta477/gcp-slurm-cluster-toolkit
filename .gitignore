@@ -1,0 +1,7 @@
+# Generated deployment folder and Terraform state
+hpc-slurm/
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+gcluster

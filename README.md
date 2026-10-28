@@ -1,2 +1,61 @@
-# gcp-slurm-cluster-toolkit
-Repo for implementing the SLURM in gcp
+# GCP Slurm Cluster with Cluster Toolkit
+
+A minimal [Google Cluster Toolkit](https://github.com/GoogleCloudPlatform/cluster-toolkit) blueprint that deploys an autoscaling Slurm cluster on Google Cloud.
+
+## What it builds
+
+| Module | Purpose |
+|---|---|
+| `network` | VPC for the cluster |
+| `homefs` | Filestore share mounted as `/home` on every node |
+| `compute_nodeset` | Up to 10 `c2-standard-60` compute VMs, created on demand and deleted when idle |
+| `compute_partition` | The `compute` Slurm partition (default queue) |
+| `slurm_login` | Login node where users SSH in and run `sbatch` / `srun` |
+| `slurm_controller` | Slurm controller that ties everything together |
+
+## How it works
+
+You don't write Terraform by hand. The `gcluster` CLI reads the YAML blueprint, resolves the `use:` links between modules, generates a full Terraform project, and runs it.
+
+```
+blueprint (YAML)  →  gcluster  →  Terraform (+ Packer)  →  cluster on GCP
+```
+
+## Prerequisites
+
+- A Google Cloud project with billing enabled
+- `gcloud` authenticated (`gcloud auth application-default login`)
+- [Terraform](https://developer.hashicorp.com/terraform/install) installed
+- The `gcluster` binary, from the [Cluster Toolkit releases](https://github.com/GoogleCloudPlatform/cluster-toolkit/releases) or built from source with `make`
+
+## Usage
+
+```bash
+# 1. Generate the Terraform deployment folder
+./gcluster create hpc-slurm.yaml --vars project_id=<YOUR_PROJECT_ID>
+
+# 2. Deploy (runs terraform init/plan/apply)
+./gcluster deploy hpc-slurm
+
+# 3. SSH to the login node, then submit a test job
+srun -N 2 hostname
+
+# 4. Tear everything down when finished
+./gcluster destroy hpc-slurm
+```
+
+## Using plain Terraform instead
+
+Run `gcluster create` once, then manage the generated `hpc-slurm/` folder with normal `terraform plan` / `terraform apply`, a remote state backend and your usual CI.
+
+## Customizing
+
+- **GPUs:** change `machine_type` in `compute_nodeset` to a GPU type such as `a3-highgpu-8g` (check quota and zone availability).
+- **Cluster size:** adjust `node_count_dynamic_max`.
+- **Region/zone:** edit the `vars` block.
+
+## Notes
+
+- Module paths and settings change between toolkit releases. Compare against the `examples/` folder of the version you install, especially `examples/hpc-slurm.yaml`.
+- The login and controller nodes have public IPs for simplicity. For production, disable them and use IAP or a bastion.
+- Running this creates billable resources. Remember to `destroy` when done.

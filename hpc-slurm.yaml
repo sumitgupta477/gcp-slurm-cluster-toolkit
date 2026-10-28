@@ -1,0 +1,64 @@
+# Cluster Toolkit blueprint: a small Slurm cluster on Google Cloud.
+# Modeled on the toolkit's examples/hpc-slurm.yaml.
+# Module paths and settings change between toolkit releases,
+# so compare against the examples/ folder in the version you install.
+
+blueprint_name: hpc-slurm
+
+vars:
+  project_id: my-gcp-project      # <-- your GCP project ID
+  deployment_name: hpc-slurm      # name for this deployment (folder + resource prefix)
+  region: us-central1
+  zone: us-central1-a
+
+deployment_groups:
+- group: primary
+  modules:
+
+  # 1. Network: a VPC for the cluster
+  - id: network
+    source: modules/network/vpc
+
+  # 2. Shared storage: a Filestore share mounted as /home on every node
+  - id: homefs
+    source: modules/file-system/filestore
+    use: [network]
+    settings:
+      local_mount: /home
+
+  # 3. Compute nodes (a "nodeset"): VMs that are created only when jobs need them
+  - id: compute_nodeset
+    source: community/modules/compute/schedmd-slurm-gcp-v6-nodeset
+    use: [network]
+    settings:
+      machine_type: c2-standard-60
+      node_count_dynamic_max: 10   # autoscale from 0 up to 10 nodes
+      allow_automatic_updates: false
+
+  # 4. Partition: the Slurm queue users submit to
+  - id: compute_partition
+    source: community/modules/compute/schedmd-slurm-gcp-v6-partition
+    use: [compute_nodeset]
+    settings:
+      partition_name: compute
+      is_default: true
+
+  # 5. Login node: where users SSH in and run sbatch/srun
+  - id: slurm_login
+    source: community/modules/scheduler/schedmd-slurm-gcp-v6-login
+    use: [network]
+    settings:
+      machine_type: n2-standard-4
+      enable_login_public_ips: true
+
+  # 6. Controller: the Slurm "head chef" that ties everything together
+  - id: slurm_controller
+    source: community/modules/scheduler/schedmd-slurm-gcp-v6-controller
+    use: [network, compute_partition, homefs, slurm_login]
+    settings:
+      enable_controller_public_ips: true
+
+# Usage (from the cluster-toolkit folder, after `make`):
+#   ./gcluster create hpc-slurm.yaml --vars project_id=my-gcp-project
+#   ./gcluster deploy hpc-slurm      # runs terraform init/plan/apply for you
+#   ./gcluster destroy hpc-slurm     # tears everything down

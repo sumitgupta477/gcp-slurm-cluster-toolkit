@@ -7,11 +7,13 @@ A minimal [Google Cluster Toolkit](https://github.com/GoogleCloudPlatform/cluste
 | Module | Purpose |
 |---|---|
 | `network` | VPC for the cluster |
-| `homefs` | Filestore share mounted as `/home` on every node |
+| `homefs` | 1 TiB `BASIC_HDD` Filestore share mounted as `/home` on every node |
 | `compute_nodeset` | Up to 10 `c2-standard-60` compute VMs, created on demand and deleted when idle |
 | `compute_partition` | The `compute` Slurm partition (default queue) |
-| `slurm_login` | Login node where users SSH in and run `sbatch` / `srun` |
-| `slurm_controller` | Slurm controller that ties everything together |
+| `slurm_login` | Login node where users SSH in and run `sbatch` / `srun` (private IP only) |
+| `slurm_controller` | Slurm controller that ties everything together (private IP only) |
+
+The VPC module also creates firewall rules for internal traffic and IAP SSH, plus a Cloud Router and Cloud NAT so private VMs can reach the internet outbound.
 
 ## How it works
 
@@ -37,10 +39,14 @@ blueprint (YAML)  →  gcluster  →  Terraform (+ Packer)  →  cluster on GCP
 # 2. Deploy (runs terraform init/plan/apply)
 ./gcluster deploy hpc-slurm
 
-# 3. SSH to the login node, then submit a test job
+# 3. SSH to the login node through IAP (it has no public IP)
+gcloud compute instances list --filter="name~login"   # find the login VM name
+gcloud compute ssh <LOGIN_VM_NAME> --zone us-central1-a --tunnel-through-iap
+
+# 4. Wait until `sinfo` shows the compute partition, then submit a test job
 srun -N 2 hostname
 
-# 4. Tear everything down when finished
+# 5. Tear everything down when finished
 ./gcluster destroy hpc-slurm
 ```
 
@@ -53,9 +59,10 @@ Run `gcluster create` once, then manage the generated `hpc-slurm/` folder with n
 - **GPUs:** change `machine_type` in `compute_nodeset` to a GPU type such as `a3-highgpu-8g` (check quota and zone availability).
 - **Cluster size:** adjust `node_count_dynamic_max`.
 - **Region/zone:** edit the `vars` block.
+- **Faster storage:** set `filestore_tier: BASIC_SSD` and `size_gb: 2560` (the SSD tier's minimum).
 
 ## Notes
 
 - Module paths and settings change between toolkit releases. Compare against the `examples/` folder of the version you install, especially `examples/hpc-slurm.yaml`.
-- The login and controller nodes have public IPs for simplicity. For production, disable them and use IAP or a bastion.
+- The login and controller nodes have no public IPs. SSH access uses IAP, which needs the `IAP-secured Tunnel User` role on your account.
 - Running this creates billable resources. Remember to `destroy` when done.

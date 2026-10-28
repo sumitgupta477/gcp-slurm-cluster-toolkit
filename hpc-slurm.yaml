@@ -20,11 +20,15 @@ deployment_groups:
     source: modules/network/vpc
 
   # 2. Shared storage: a Filestore share mounted as /home on every node
+  #    BASIC_HDD at 1 TiB (its minimum) keeps test clusters cheap.
+  #    For faster I/O use BASIC_SSD, whose minimum size is 2560 GiB.
   - id: homefs
     source: modules/file-system/filestore
     use: [network]
     settings:
       local_mount: /home
+      filestore_tier: BASIC_HDD
+      size_gb: 1024
 
   # 3. Compute nodes (a "nodeset"): VMs that are created only when jobs need them
   - id: compute_nodeset
@@ -44,21 +48,23 @@ deployment_groups:
       is_default: true
 
   # 5. Login node: where users SSH in and run sbatch/srun
+  #    No public IP: SSH goes through IAP, and Cloud NAT handles outbound traffic.
   - id: slurm_login
     source: community/modules/scheduler/schedmd-slurm-gcp-v6-login
     use: [network]
     settings:
       machine_type: n2-standard-4
-      enable_login_public_ips: true
+      enable_login_public_ips: false
 
   # 6. Controller: the Slurm "head chef" that ties everything together
   - id: slurm_controller
     source: community/modules/scheduler/schedmd-slurm-gcp-v6-controller
     use: [network, compute_partition, homefs, slurm_login]
     settings:
-      enable_controller_public_ips: true
+      enable_controller_public_ips: false
 
 # Usage (from the cluster-toolkit folder, after `make`):
 #   ./gcluster create hpc-slurm.yaml --vars project_id=my-gcp-project
 #   ./gcluster deploy hpc-slurm      # runs terraform init/plan/apply for you
+#   gcloud compute ssh <login-vm-name> --zone us-central1-a --tunnel-through-iap
 #   ./gcluster destroy hpc-slurm     # tears everything down

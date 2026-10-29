@@ -47,7 +47,34 @@ deployment_groups:
       partition_name: compute
       is_default: true
 
-  # 5. Login node: where users SSH in and run sbatch/srun
+  # 5. GPU nodes (optional): up to 2 g2-standard-4 VMs, each with 1 NVIDIA L4 GPU.
+  #    G2 machines come with their GPU attached, so no guest_accelerator setting is needed.
+  #    The GPU image adds NVIDIA drivers and CUDA, with the same Slurm version as the CPU nodes.
+  #    Needs NVIDIA L4 GPU quota in the region and a zone that offers G2 (us-central1-a does).
+  - id: gpu_nodeset
+    source: community/modules/compute/schedmd-slurm-gcp-v6-nodeset
+    use: [network]
+    settings:
+      machine_type: g2-standard-4
+      node_count_dynamic_max: 2
+      instance_image:
+        project: advanced-compute-images
+        family: aci-gpu-u2404-slurm-2605-cuda-132-nvidia-595-amd64
+      disk_type: pd-balanced
+      disk_size_gb: 100            # GPU image with CUDA needs more room than the 50 GB default
+      allow_automatic_updates: false
+
+  # 6. GPU partition: submit with `-p gpu --gpus=1`
+  #    exclusive: false lets nodes stay up briefly between jobs instead of being
+  #    deleted right after each one, so back-to-back GPU jobs start faster.
+  - id: gpu_partition
+    source: community/modules/compute/schedmd-slurm-gcp-v6-partition
+    use: [gpu_nodeset]
+    settings:
+      partition_name: gpu
+      exclusive: false
+
+  # 7. Login node: where users SSH in and run sbatch/srun
   #    No public IP: SSH goes through IAP, and Cloud NAT handles outbound traffic.
   - id: slurm_login
     source: community/modules/scheduler/schedmd-slurm-gcp-v6-login
@@ -56,10 +83,10 @@ deployment_groups:
       machine_type: n2-standard-4
       enable_login_public_ips: false
 
-  # 6. Controller: the Slurm "head chef" that ties everything together
+  # 8. Controller: the Slurm "head chef" that ties everything together
   - id: slurm_controller
     source: community/modules/scheduler/schedmd-slurm-gcp-v6-controller
-    use: [network, compute_partition, homefs, slurm_login]
+    use: [network, compute_partition, gpu_partition, homefs, slurm_login]
     settings:
       enable_controller_public_ips: false
 

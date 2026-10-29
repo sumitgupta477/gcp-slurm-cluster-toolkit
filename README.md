@@ -10,6 +10,8 @@ A minimal [Google Cluster Toolkit](https://github.com/GoogleCloudPlatform/cluste
 | `homefs` | 1 TiB `BASIC_HDD` Filestore share mounted as `/home` on every node |
 | `compute_nodeset` | Up to 10 `c2-standard-60` compute VMs, created on demand and deleted when idle |
 | `compute_partition` | The `compute` Slurm partition (default queue) |
+| `gpu_nodeset` | Up to 2 `g2-standard-4` VMs with 1 NVIDIA L4 GPU each, created on demand, using a GPU image with NVIDIA drivers and CUDA |
+| `gpu_partition` | The `gpu` Slurm partition (`exclusive: false`, so nodes linger briefly between jobs) |
 | `slurm_login` | Login node where users SSH in and run `sbatch` / `srun` (private IP only) |
 | `slurm_controller` | Slurm controller that ties everything together (private IP only) |
 
@@ -40,7 +42,9 @@ Run `setup-permissions.sh` as a project Owner or Project IAM Admin. It enables t
 SKIP_USER_ROLES=1 ./setup-permissions.sh <YOUR_PROJECT_ID> <DEPLOYER_EMAIL>
 ```
 
-Also check quotas: 10 `c2-standard-60` nodes need 600 C2 vCPUs in the region.
+Also check quotas in the region:
+- **CPU queue:** 10 `c2-standard-60` nodes need 600 C2 vCPUs.
+- **GPU queue:** 2 `g2-standard-4` nodes need 2 NVIDIA L4 GPUs (`NVIDIA_L4_GPUS`) and 8 G2 vCPUs. GPU quota often starts at 0, so request it first. If you don't need GPUs, remove `gpu_nodeset` and `gpu_partition` (and `gpu_partition` from the controller's `use:` list).
 
 ## Usage
 
@@ -55,8 +59,9 @@ Also check quotas: 10 `c2-standard-60` nodes need 600 C2 vCPUs in the region.
 gcloud compute instances list --filter="name~login"   # find the login VM name
 gcloud compute ssh <LOGIN_VM_NAME> --zone us-central1-a --tunnel-through-iap
 
-# 4. Wait until `sinfo` shows the compute partition, then submit a test job
-srun -N 2 hostname
+# 4. Wait until `sinfo` shows the partitions, then submit test jobs
+srun -N 2 hostname                  # CPU queue (default)
+srun -p gpu --gpus=1 nvidia-smi     # GPU queue: should list one NVIDIA L4
 
 # 5. Tear everything down when finished
 ./gcluster destroy hpc-slurm
@@ -68,7 +73,7 @@ Run `gcluster create` once, then manage the generated `hpc-slurm/` folder with n
 
 ## Customizing
 
-- **GPUs:** change `machine_type` in `compute_nodeset` to a GPU type such as `a3-highgpu-8g` (check quota and zone availability).
+- **Bigger GPUs:** change `machine_type` in `gpu_nodeset` to `g2-standard-48` (4 L4s), an `a2` (A100) or an `a3` (H100) type, and check quota and zone availability. Jobs can share a multi-GPU node, each getting its own GPUs, e.g. `sbatch -p gpu --gpus=2 train.sh`.
 - **Cluster size:** adjust `node_count_dynamic_max`.
 - **Region/zone:** edit the `vars` block.
 - **Faster storage:** set `filestore_tier: BASIC_SSD` and `size_gb: 2560` (the SSD tier's minimum).

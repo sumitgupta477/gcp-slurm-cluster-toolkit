@@ -30,6 +30,18 @@ blueprint (YAML)  →  gcluster  →  Terraform (+ Packer)  →  cluster on GCP
 - [Terraform](https://developer.hashicorp.com/terraform/install) installed
 - The `gcluster` binary, from the [Cluster Toolkit releases](https://github.com/GoogleCloudPlatform/cluster-toolkit/releases) or built from source with `make`
 
+### Permissions and APIs (one-time)
+
+Run `setup-permissions.sh` as a project Owner or Project IAM Admin. It enables the required APIs, grants the deployer the roles to create the cluster and SSH in through IAP, and grants the default Compute Engine service account the roles the Slurm controller needs to create compute VMs.
+
+```bash
+./setup-permissions.sh <YOUR_PROJECT_ID> <DEPLOYER_EMAIL>
+# Already a project Owner? Skip the deploy roles:
+SKIP_USER_ROLES=1 ./setup-permissions.sh <YOUR_PROJECT_ID> <DEPLOYER_EMAIL>
+```
+
+Also check quotas: 10 `c2-standard-60` nodes need 600 C2 vCPUs in the region.
+
 ## Usage
 
 ```bash

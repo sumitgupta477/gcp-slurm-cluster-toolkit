@@ -1,6 +1,6 @@
-# GCP Slurm Cluster with Cluster Toolkit
+# GCP GPU Slurm Cluster with Cluster Toolkit
 
-A minimal [Google Cluster Toolkit](https://github.com/GoogleCloudPlatform/cluster-toolkit) blueprint that deploys an autoscaling Slurm cluster on Google Cloud.
+A minimal [Google Cluster Toolkit](https://github.com/GoogleCloudPlatform/cluster-toolkit) blueprint that deploys an autoscaling GPU Slurm cluster on Google Cloud, using NVIDIA L4 GPUs.
 
 ## What it builds
 
@@ -8,12 +8,12 @@ A minimal [Google Cluster Toolkit](https://github.com/GoogleCloudPlatform/cluste
 |---|---|
 | `network` | VPC for the cluster |
 | `homefs` | 1 TiB `BASIC_HDD` Filestore share mounted as `/home` on every node |
-| `compute_nodeset` | Up to 10 `c2-standard-60` compute VMs, created on demand and deleted when idle |
-| `compute_partition` | The `compute` Slurm partition (default queue) |
-| `gpu_nodeset` | Up to 2 `g2-standard-4` VMs with 1 NVIDIA L4 GPU each, created on demand, using a GPU image with NVIDIA drivers and CUDA |
-| `gpu_partition` | The `gpu` Slurm partition (`exclusive: false`, so nodes linger briefly between jobs) |
+| `gpu_nodeset` | Up to 2 `g2-standard-4` VMs (4 vCPUs, 16 GB RAM, 1 NVIDIA L4 GPU each), created on demand and deleted when idle |
+| `gpu_partition` | The `gpu` Slurm partition, the only and default queue (`exclusive: false`, so nodes linger briefly between jobs) |
 | `slurm_login` | Login node where users SSH in and run `sbatch` / `srun` (private IP only) |
 | `slurm_controller` | Slurm controller that ties everything together (private IP only) |
+
+Every VM uses the same image, `aci-gpu-u2404-slurm-2605-cuda-132-nvidia-595-amd64`: Ubuntu 24.04, Slurm 26.05, NVIDIA driver 595 and CUDA 13.2. This matches how Google's own GPU blueprints set the image for the whole cluster.
 
 The VPC module also creates firewall rules for internal traffic and IAP SSH, plus a Cloud Router and Cloud NAT so private VMs can reach the internet outbound.
 
@@ -42,9 +42,9 @@ Run `setup-permissions.sh` as a project Owner or Project IAM Admin. It enables t
 SKIP_USER_ROLES=1 ./setup-permissions.sh <YOUR_PROJECT_ID> <DEPLOYER_EMAIL>
 ```
 
-Also check quotas in the region:
-- **CPU queue:** 10 `c2-standard-60` nodes need 600 C2 vCPUs.
-- **GPU queue:** 2 `g2-standard-4` nodes need 2 NVIDIA L4 GPUs (`NVIDIA_L4_GPUS`) and 8 G2 vCPUs. GPU quota often starts at 0, so request it first. If you don't need GPUs, remove `gpu_nodeset` and `gpu_partition` (and `gpu_partition` from the controller's `use:` list).
+### Quota (request before deploying)
+
+In `us-central1`, 2 `g2-standard-4` nodes need **2 NVIDIA L4 GPUs** (`NVIDIA_L4_GPUS`) and **8 G2 vCPUs**. GPU quota often starts at 0, so request it first. Without it, the cluster deploys but GPU nodes fail to start and jobs stay pending.
 
 ## Usage
 
@@ -59,12 +59,20 @@ Also check quotas in the region:
 gcloud compute instances list --filter="name~login"   # find the login VM name
 gcloud compute ssh <LOGIN_VM_NAME> --zone us-central1-a --tunnel-through-iap
 
-# 4. Wait until `sinfo` shows the partitions, then submit test jobs
-srun -N 2 hostname                  # CPU queue (default)
-srun -p gpu --gpus=1 nvidia-smi     # GPU queue: should list one NVIDIA L4
+# 4. Wait until `sinfo` shows the gpu partition, then submit a test job
+srun --gpus=1 nvidia-smi             # should list one NVIDIA L4
 
 # 5. Tear everything down when finished
 ./gcluster destroy hpc-slurm
+```
+
+Jobs go to the `gpu` queue by default, but **must request the GPU** with `--gpus=1`. Without it, a job only gets the node's CPUs and can't see the GPU.
+
+```bash
+#!/bin/bash
+#SBATCH --gpus=1
+#SBATCH --time=01:00:00
+python train.py
 ```
 
 ## Using plain Terraform instead
@@ -73,13 +81,16 @@ Run `gcluster create` once, then manage the generated `hpc-slurm/` folder with n
 
 ## Customizing
 
-- **Bigger GPUs:** change `machine_type` in `gpu_nodeset` to `g2-standard-48` (4 L4s), an `a2` (A100) or an `a3` (H100) type, and check quota and zone availability. Jobs can share a multi-GPU node, each getting its own GPUs, e.g. `sbatch -p gpu --gpus=2 train.sh`.
-- **Cluster size:** adjust `node_count_dynamic_max`.
-- **Region/zone:** edit the `vars` block.
+- **More GPU jobs at once:** raise `node_count_dynamic_max` (and your L4 quota).
+- **Bigger GPUs:** change `machine_type` in `gpu_nodeset` to `g2-standard-48` (4 L4s), an `a2` (A100) or an `a3` (H100) type, and check quota and zone availability. Jobs can share a multi-GPU node, each getting its own GPUs, e.g. `sbatch --gpus=2 train.sh`.
+- **Region/zone:** edit the `vars` block; the zone must offer your GPU type.
 - **Faster storage:** set `filestore_tier: BASIC_SSD` and `size_gb: 2560` (the SSD tier's minimum).
+- **CPU-only work:** add a CPU nodeset and partition (see `examples/hpc-slurm.yaml` in the toolkit) rather than running large CPU jobs on the 4-vCPU GPU nodes.
 
 ## Notes
 
-- Module paths and settings change between toolkit releases. Compare against the `examples/` folder of the version you install, especially `examples/hpc-slurm.yaml`.
+- Module paths and settings change between toolkit releases. Compare against the `examples/` folder of the version you install.
 - The login and controller nodes have no public IPs. SSH access uses IAP, which needs the `IAP-secured Tunnel User` role on your account.
+- The controller, login and GPU nodes get 100 GB boot disks, because the GPU image is larger than the modules' 50 GB default.
+- This blueprint has been checked against current module inputs but not test-deployed.
 - Running this creates billable resources. Remember to `destroy` when done.

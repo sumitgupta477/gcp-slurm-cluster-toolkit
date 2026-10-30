@@ -93,4 +93,4 @@ done
 
 echo
 echo "Done. IAM changes can take a minute or two to take effect."
-echo "Next: check C2 vCPU and Filestore quotas, then run gcluster create/deploy."
+echo "Next: check NVIDIA L4 GPU, G2 vCPU and Filestore quotas, then run gcluster create/deploy."

@@ -1,5 +1,5 @@
-# Cluster Toolkit blueprint: a small Slurm cluster on Google Cloud.
-# Modeled on the toolkit's examples/hpc-slurm.yaml.
+# Cluster Toolkit blueprint: a small GPU Slurm cluster on Google Cloud.
+# Modeled on the toolkit's examples/hpc-slurm.yaml and its GPU blueprints.
 # Module paths and settings change between toolkit releases,
 # so compare against the examples/ folder in the version you install.
 
@@ -9,7 +9,12 @@ vars:
   project_id: my-gcp-project      # <-- your GCP project ID
   deployment_name: hpc-slurm      # name for this deployment (folder + resource prefix)
   region: us-central1
-  zone: us-central1-a
+  zone: us-central1-a             # must offer G2 / NVIDIA L4 (us-central1-a does)
+  # One image for every VM (controller, login and GPU nodes), as Google's GPU
+  # blueprints do: Ubuntu 24.04 + Slurm 26.05 + NVIDIA driver 595 + CUDA 13.2.
+  instance_image:
+    project: advanced-compute-images
+    family: aci-gpu-u2404-slurm-2605-cuda-132-nvidia-595-amd64
 
 deployment_groups:
 - group: primary
@@ -30,41 +35,21 @@ deployment_groups:
       filestore_tier: BASIC_HDD
       size_gb: 1024
 
-  # 3. Compute nodes (a "nodeset"): VMs that are created only when jobs need them
-  - id: compute_nodeset
-    source: community/modules/compute/schedmd-slurm-gcp-v6-nodeset
-    use: [network]
-    settings:
-      machine_type: c2-standard-60
-      node_count_dynamic_max: 10   # autoscale from 0 up to 10 nodes
-      allow_automatic_updates: false
-
-  # 4. Partition: the Slurm queue users submit to
-  - id: compute_partition
-    source: community/modules/compute/schedmd-slurm-gcp-v6-partition
-    use: [compute_nodeset]
-    settings:
-      partition_name: compute
-      is_default: true
-
-  # 5. GPU nodes (optional): up to 2 g2-standard-4 VMs, each with 1 NVIDIA L4 GPU.
+  # 3. GPU nodes: up to 2 g2-standard-4 VMs, each with 1 NVIDIA L4 GPU,
+  #    created only when jobs need them.
   #    G2 machines come with their GPU attached, so no guest_accelerator setting is needed.
-  #    The GPU image adds NVIDIA drivers and CUDA, with the same Slurm version as the CPU nodes.
-  #    Needs NVIDIA L4 GPU quota in the region and a zone that offers G2 (us-central1-a does).
+  #    Needs NVIDIA L4 GPU quota in the region.
   - id: gpu_nodeset
     source: community/modules/compute/schedmd-slurm-gcp-v6-nodeset
     use: [network]
     settings:
       machine_type: g2-standard-4
-      node_count_dynamic_max: 2
-      instance_image:
-        project: advanced-compute-images
-        family: aci-gpu-u2404-slurm-2605-cuda-132-nvidia-595-amd64
+      node_count_dynamic_max: 2    # autoscale from 0 up to 2 nodes
       disk_type: pd-balanced
       disk_size_gb: 100            # GPU image with CUDA needs more room than the 50 GB default
       allow_automatic_updates: false
 
-  # 6. GPU partition: submit with `-p gpu --gpus=1`
+  # 4. GPU partition: the only (and default) queue. Request the GPU with `--gpus=1`.
   #    exclusive: false lets nodes stay up briefly between jobs instead of being
   #    deleted right after each one, so back-to-back GPU jobs start faster.
   - id: gpu_partition
@@ -72,26 +57,30 @@ deployment_groups:
     use: [gpu_nodeset]
     settings:
       partition_name: gpu
+      is_default: true
       exclusive: false
 
-  # 7. Login node: where users SSH in and run sbatch/srun
+  # 5. Login node: where users SSH in and run sbatch/srun
   #    No public IP: SSH goes through IAP, and Cloud NAT handles outbound traffic.
   - id: slurm_login
     source: community/modules/scheduler/schedmd-slurm-gcp-v6-login
     use: [network]
     settings:
       machine_type: n2-standard-4
+      disk_size_gb: 100            # room for the GPU image
       enable_login_public_ips: false
 
-  # 8. Controller: the Slurm "head chef" that ties everything together
+  # 6. Controller: the Slurm "head chef" that ties everything together
   - id: slurm_controller
     source: community/modules/scheduler/schedmd-slurm-gcp-v6-controller
-    use: [network, compute_partition, gpu_partition, homefs, slurm_login]
+    use: [network, gpu_partition, homefs, slurm_login]
     settings:
+      disk_size_gb: 100            # room for the GPU image
       enable_controller_public_ips: false
 
 # Usage (from the cluster-toolkit folder, after `make`):
 #   ./gcluster create hpc-slurm.yaml --vars project_id=my-gcp-project
 #   ./gcluster deploy hpc-slurm      # runs terraform init/plan/apply for you
 #   gcloud compute ssh <login-vm-name> --zone us-central1-a --tunnel-through-iap
+#   srun --gpus=1 nvidia-smi         # test: should list one NVIDIA L4
 #   ./gcluster destroy hpc-slurm     # tears everything down

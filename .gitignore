@@ -5,3 +5,8 @@ hpc-slurm/
 *.tfstate.*
 *.tfvars
 gcluster
+
+# train-to-vertex example
+examples/train-to-vertex/.last_deploy
+__pycache__/
+*.out

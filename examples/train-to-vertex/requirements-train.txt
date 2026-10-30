@@ -1,0 +1,7 @@
+# Training environment on the Slurm cluster (installed by setup_env.sh into ~/venv-train).
+# Pinned versions known to install together; the cluster's NVIDIA driver supports these CUDA 12.4 wheels.
+torch==2.5.1
+transformers==4.46.3
+datasets==3.1.0
+accelerate==1.1.1
+google-cloud-storage

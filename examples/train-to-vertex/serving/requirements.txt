@@ -1,0 +1,6 @@
+# Same torch/transformers versions as training, so the saved model loads identically.
+torch==2.5.1
+transformers==4.46.3
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+google-cloud-storage

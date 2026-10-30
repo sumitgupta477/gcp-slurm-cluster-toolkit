@@ -2,6 +2,41 @@
 
 A minimal [Google Cluster Toolkit](https://github.com/GoogleCloudPlatform/cluster-toolkit) blueprint that deploys an autoscaling GPU Slurm cluster on Google Cloud, using NVIDIA L4 GPUs.
 
+## Architecture
+
+```mermaid
+flowchart LR
+    user["You<br/>(laptop / Cloud Shell)"]
+    iap["Identity-Aware Proxy<br/>(SSH with your Google identity)"]
+
+    subgraph vpc["VPC: private IPs only"]
+        direction LR
+        login["Login VM<br/>n2-standard-4<br/>sbatch / squeue"]
+        ctrl["Controller VM<br/>slurmctld + slurmdbd"]
+        subgraph gpu["gpu partition: 0-2 nodes, created on demand"]
+            direction TB
+            g0["GPU node<br/>g2-standard-4<br/>1x NVIDIA L4"]
+            g1["GPU node<br/>g2-standard-4<br/>1x NVIDIA L4"]
+        end
+    end
+
+    fs[("Filestore 1 TiB<br/>/home on every VM")]
+    nat["Cloud Router + Cloud NAT"]
+    internet(("Internet"))
+
+    user -->|gcloud compute ssh| iap -->|port 22| login
+    login -->|submit jobs, port 6817| ctrl
+    ctrl -->|start VM, run job, port 6818| gpu
+    vpc ---|NFS mount| fs
+    vpc -->|outbound only| nat --> internet
+```
+
+1. You SSH to the **login VM** through **IAP**. No VM has a public IP.
+2. `sbatch --gpus=1 job.sh` sends the job to the **controller**.
+3. The controller **creates a GPU VM** if none is free, runs the job on it, and **deletes the VM** after 5 idle minutes.
+4. Every VM mounts the shared **`/home`** from Filestore, so code and results are visible everywhere.
+5. VMs reach the internet **outbound only**, through Cloud NAT.
+
 ## What it builds
 
 | Module | Purpose |

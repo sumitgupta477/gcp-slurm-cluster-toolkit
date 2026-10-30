@@ -55,6 +55,8 @@ echo "== Cloud Build permissions"
 # the image and read the uploaded source (it already has storage.objectViewer and
 # logging.logWriter from setup-permissions.sh).
 grant "$VM_SA" roles/artifactregistry.writer
+# Lets training jobs on the cluster register new model versions (train.py --register).
+grant "$VM_SA" roles/aiplatform.user
 LEGACY_CB_SA="${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com"
 if gcloud iam service-accounts describe "$LEGACY_CB_SA" --project "$PROJECT_ID" >/dev/null 2>&1; then
   grant "serviceAccount:$LEGACY_CB_SA" roles/artifactregistry.writer   # older projects
@@ -96,4 +98,5 @@ fi
 echo
 echo "Done. Next:"
 echo "  On the cluster:  sbatch --export=ALL,GCS_MODEL_URI=gs://$BUCKET/models/sentiment-v1 train.sh"
-echo "  Then here:       ./deploy_vertex.sh $PROJECT_ID gs://$BUCKET/models/sentiment-v1 $REGION"
+echo "  Then here:       REGION=$REGION ./deploy_vertex.sh $PROJECT_ID gs://$BUCKET/models/sentiment-v1"
+echo "  Or auto-register from training: ./build_image.sh $PROJECT_ID $REGION  (see README)"

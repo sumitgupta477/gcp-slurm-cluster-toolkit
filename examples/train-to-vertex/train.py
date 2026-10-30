@@ -7,7 +7,13 @@ Training data comes from (pick one):
   * a Hugging Face Hub dataset (default: imdb), or a local save_to_disk() folder: --dataset
   * a BigQuery query returning `text` and `label` columns (+ optional `split`):  --bq_query
 
+With --register, the uploaded model is also added to the Vertex AI Model Registry as a
+NEW VERSION of one model (created on the first run), optionally only if accuracy is good
+enough (--min_accuracy). Registering does not serve it; deploy a version later.
+
     python train.py --output_dir ~/models/sentiment-v1 --gcs_uri gs://BUCKET/models/sentiment-v1
+    python train.py --output_dir ~/models/run-7 --gcs_uri gs://BUCKET/models/run-7 \\
+        --register --serving_image REGION-docker.pkg.dev/PROJECT/serving/hf-sentiment-server:latest
     python train.py --output_dir ~/models/sentiment-bq \\
         --bq_query 'SELECT review AS text, sentiment AS label FROM `my-project.reviews.movie_reviews`'
 """
@@ -50,9 +56,25 @@ def parse_args():
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--learning_rate", type=float, default=5e-5)
     p.add_argument("--max_length", type=int, default=256)
+    # Vertex AI Model Registry
+    p.add_argument("--register", action="store_true",
+                   help="Add the uploaded model to the Vertex AI Model Registry as a new version")
+    p.add_argument("--model_display_name", default="sentiment-classifier",
+                   help="Registry model that new versions are added to")
+    p.add_argument("--serving_image", default=os.environ.get("SERVING_IMAGE", ""),
+                   help="Serving container image (from build_image.sh); env SERVING_IMAGE")
+    p.add_argument("--region", default=os.environ.get("REGION", "us-central1"))
+    p.add_argument("--project", default=os.environ.get("PROJECT_ID") or None,
+                   help="Defaults to the VM's project")
+    p.add_argument("--min_accuracy", type=float, default=None,
+                   help="Only register if eval accuracy is at least this (e.g. 0.85)")
     args = p.parse_args()
     if args.bq_query and args.bq_query_file:
         p.error("use --bq_query or --bq_query_file, not both")
+    if args.register and not args.gcs_uri:
+        p.error("--register needs --gcs_uri (Vertex AI reads the model from Cloud Storage)")
+    if args.register and not args.serving_image:
+        p.error("--register needs --serving_image or the SERVING_IMAGE env var (run build_image.sh first)")
     if args.bq_query_file:
         args.bq_query = Path(args.bq_query_file).expanduser().read_text()
     return args
@@ -112,6 +134,46 @@ def upload_dir_to_gcs(local_dir: Path, gcs_uri: str) -> None:
             blob_name = f"{prefix.rstrip('/')}/{path.relative_to(local_dir).as_posix()}".lstrip("/")
             bucket.blob(blob_name).upload_from_filename(str(path))
             print(f"uploaded gs://{bucket_name}/{blob_name}")
+
+
+def register_model(args, metrics: dict) -> dict:
+    """Upload the GCS model to the Vertex AI Model Registry as a new default version."""
+    from google.cloud import aiplatform  # imported here so local runs don't need it
+
+    aiplatform.init(project=args.project, location=args.region)
+    name = args.model_display_name
+    existing = aiplatform.Model.list(filter=f'display_name="{name}"', order_by="create_time desc")
+    parent = existing[0].resource_name if existing else None
+
+    accuracy = metrics.get("eval_accuracy")
+    job_id = os.environ.get("SLURM_JOB_ID", "local")
+    labels = {"source": "slurm", "slurm_job": str(job_id).lower()[:63]}
+    if accuracy is not None:
+        labels["eval_accuracy"] = f"{accuracy:.4f}".replace(".", "_")
+
+    model = aiplatform.Model.upload(
+        display_name=name,
+        artifact_uri=args.gcs_uri,
+        serving_container_image_uri=args.serving_image,
+        serving_container_ports=[8080],
+        serving_container_health_route="/health",
+        serving_container_predict_route="/predict",
+        parent_model=parent,           # None on the first run -> creates the model (version 1)
+        is_default_version=True,       # newest version becomes the default
+        version_description=f"Slurm job {job_id}; eval_accuracy={accuracy}; data={args.bq_query and 'bigquery' or args.dataset}",
+        labels=labels,
+        sync=True,
+    )
+    info = {
+        "model": model.resource_name,
+        "display_name": name,
+        "version_id": model.version_id,
+        "new_model": parent is None,
+        "artifact_uri": args.gcs_uri,
+        "eval_accuracy": accuracy,
+    }
+    print(f"Registered {name} version {model.version_id} ({model.resource_name})")
+    return info
 
 
 def main():
@@ -186,6 +248,15 @@ def main():
     if args.gcs_uri:
         upload_dir_to_gcs(output_dir, args.gcs_uri)
         print(f"Model uploaded to {args.gcs_uri}")
+
+    # 7. Optional: register in the Vertex AI Model Registry (does not deploy)
+    if args.register:
+        accuracy = metrics.get("eval_accuracy")
+        if args.min_accuracy is not None and (accuracy is None or accuracy < args.min_accuracy):
+            print(f"NOT registering: eval_accuracy={accuracy} is below --min_accuracy={args.min_accuracy}")
+            return
+        info = register_model(args, metrics)
+        (output_dir / "registry.json").write_text(json.dumps(info, indent=2))
 
 
 if __name__ == "__main__":

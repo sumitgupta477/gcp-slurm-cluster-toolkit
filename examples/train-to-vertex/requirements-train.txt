@@ -7,3 +7,5 @@ accelerate==1.1.1
 google-cloud-storage
 # BigQuery as a data source (--bq_query): client + fast Storage API reads + pandas support
 google-cloud-bigquery[bqstorage,pandas]
+# Vertex AI Model Registry (--register)
+google-cloud-aiplatform

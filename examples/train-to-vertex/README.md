@@ -21,7 +21,8 @@ flowchart LR
 | `train.py` | GPU node | Fine-tunes the model (data from the Hugging Face Hub or **BigQuery**), saves it to `/home`, uploads it to GCS |
 | `query_example.sql` | — | Example BigQuery training query (`--bq_query_file`) |
 | `serving/` | Vertex AI | Dockerfile + FastAPI server that loads the model from `AIP_STORAGE_URI` |
-| `deploy_vertex.sh` | Laptop / Cloud Shell | Builds the image, registers the model, deploys an endpoint, tests it |
+| `build_image.sh` | Laptop / Cloud Shell | Builds and pushes the serving image (needed once for `--register`) |
+| `deploy_vertex.sh` | Laptop / Cloud Shell | Deploys a **registered model version**, or registers + deploys straight from GCS, then tests it |
 | `cleanup_vertex.sh` | Laptop / Cloud Shell | Undeploys and deletes the endpoint and model (stops billing) |
 
 ## Steps
@@ -83,8 +84,38 @@ For a one-off, `--bq_query '...'` also works. Use **single quotes** so the shell
 - The whole result is loaded into memory, which is fine up to a few GB. For bigger tables, `EXPORT DATA` to Parquet in GCS and train from the files instead.
 - `--train_samples` and `--eval_samples` still cap how many rows are used (defaults 2000 and 500), so raise them for real training.
 
+### Registering automatically after training (model versions)
+
+Add `--register` and each successful training run adds a **new version** of one model in the **Vertex AI Model Registry**: version 1 on the first run, then 2, 3, and so on. The newest version becomes the default. Registering **doesn't deploy** anything, so it costs nothing extra.
+
+**a. Build the serving image once** (laptop or Cloud Shell). It prints the image URI:
+```bash
+./build_image.sh <PROJECT_ID>
+# -> us-central1-docker.pkg.dev/<PROJECT_ID>/serving/hf-sentiment-server:latest
+```
+
+**b. Train with `--register`** (on the cluster). Give each run its own GCS folder, since versions point at their files:
+```bash
+sbatch --export=ALL,GCS_MODEL_URI=gs://<BUCKET_NAME>/models/run-$(date +%Y%m%d-%H%M),SERVING_IMAGE=us-central1-docker.pkg.dev/<PROJECT_ID>/serving/hf-sentiment-server:latest \
+  train.sh --register --min_accuracy 0.85
+```
+- `--min_accuracy 0.85` registers **only if** evaluation accuracy is at least 85%. Leave it out to always register.
+- `--model_display_name` chooses which registry model to add versions to (default `sentiment-classifier`).
+- Each version records the Slurm job ID and accuracy (labels and description), and the job writes `registry.json` next to the saved model.
+
+**c. See the versions:**
+```bash
+gcloud ai models list --region us-central1 --filter="displayName=sentiment-classifier"
+gcloud ai models list-version <MODEL_ID> --region us-central1
+```
+
 **4. Deploy to Vertex AI** (laptop or Cloud Shell):
 ```bash
+# A registered version (from --register): the default/newest, or pick one
+./deploy_vertex.sh <PROJECT_ID> --model sentiment-classifier
+./deploy_vertex.sh <PROJECT_ID> --model sentiment-classifier 3
+
+# Or without --register: build, register and deploy straight from a GCS folder
 ./deploy_vertex.sh <PROJECT_ID> gs://<BUCKET_NAME>/models/sentiment-v1
 ```
 It ends with a test prediction like:
@@ -96,6 +127,7 @@ It ends with a test prediction like:
 ```bash
 ./cleanup_vertex.sh
 ```
+This deletes the endpoint. A registered model deployed with `--model` is **kept** with all its versions. Only the one-off model created by deploying straight from GCS is removed.
 
 ## How the serving container works
 
@@ -125,4 +157,6 @@ curl -X POST localhost:8080/predict -H 'Content-Type: application/json' -d '{"in
 - Training and serving pin the same versions (`torch 2.5.1`, `transformers 4.46.3`), so the saved model loads identically.
 - Vertex AI also needs **L4 quota for prediction** in the region. It's separate from the Compute Engine quota the Slurm cluster uses, so check **IAM & Admin → Quotas**.
 - In the same project, Vertex AI's service agent can normally read the bucket and pull the image. If deployment fails on permissions, check the deployment logs in **Vertex AI → Endpoints**.
-- Tested locally on CPU (training on a toy model and dataset, including from a simulated BigQuery result; the server with Vertex AI's environment variables; GCS upload/download against a fake bucket), but **not yet run on the cluster, BigQuery or Vertex AI**.
+- `setup_vertex.sh` gives the cluster VMs the **Vertex AI User** role so `--register` works from training jobs.
+- Deploying a specific version uses Vertex AI's `MODEL_ID@VERSION` form; the default version is used when none is given.
+- Tested locally on CPU (training on a toy model and dataset, including from a simulated BigQuery result; registration logic against a simulated Model Registry; the server with Vertex AI's environment variables; GCS upload/download against a fake bucket), but **not yet run on the cluster, BigQuery or Vertex AI**.

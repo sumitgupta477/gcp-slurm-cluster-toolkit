@@ -112,7 +112,7 @@ python train.py
 
 ## Example: train here, serve on Vertex AI
 
-[`examples/train-to-vertex/`](examples/train-to-vertex/) fine-tunes a Hugging Face model on the L4 with `sbatch`, uploads it to Cloud Storage, and serves it from a Vertex AI endpoint through a small custom container.
+[`examples/train-to-vertex/`](examples/train-to-vertex/) fine-tunes a Hugging Face model on the L4 with `sbatch` (training data from the Hugging Face Hub or a BigQuery query), uploads it to Cloud Storage, and serves it from a Vertex AI endpoint through a small custom container.
 
 ## Using plain Terraform instead
 

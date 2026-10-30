@@ -18,7 +18,8 @@ flowchart LR
 | `setup_vertex.sh` | Laptop / Cloud Shell, once | Enables APIs, creates the bucket and image repo, grants permissions |
 | `setup_env.sh` | Login VM, once | Creates the Python training environment in `~/venv-train` (shared via `/home`) |
 | `train.sh` | Slurm job (`sbatch`) | Requests 1 GPU and runs `train.py` |
-| `train.py` | GPU node | Fine-tunes the model, saves it to `/home`, uploads it to GCS |
+| `train.py` | GPU node | Fine-tunes the model (data from the Hugging Face Hub or **BigQuery**), saves it to `/home`, uploads it to GCS |
+| `query_example.sql` | — | Example BigQuery training query (`--bq_query_file`) |
 | `serving/` | Vertex AI | Dockerfile + FastAPI server that loads the model from `AIP_STORAGE_URI` |
 | `deploy_vertex.sh` | Laptop / Cloud Shell | Builds the image, registers the model, deploys an endpoint, tests it |
 | `cleanup_vertex.sh` | Laptop / Cloud Shell | Undeploys and deletes the endpoint and model (stops billing) |
@@ -47,6 +48,40 @@ squeue --me                            # PD -> CF (GPU node starting) -> R
 tail -f train-to-vertex-<JOBID>.out    # watch training
 ```
 The defaults (2,000 reviews, 1 epoch) take a few minutes on an L4. Pass extra options to `train.py` after the script name, e.g. `train.sh --epochs 2 --train_samples 10000`.
+
+### Training on your own data from BigQuery
+
+Point training at a BigQuery query instead of the IMDB dataset. The query must return:
+- **`text`**: the input text
+- **`label`**: `0`/`1`, or `negative`/`positive` (any capitalization)
+- **`split`** *(optional)*: `train` or `test`. Without it, 20% is held out automatically (`--test_size`).
+
+**a. Let the cluster read your dataset** (once; re-run `setup_vertex.sh` with `BQ_DATASET`):
+```bash
+BQ_DATASET=my-project.reviews ./setup_vertex.sh <PROJECT_ID> <BUCKET_NAME> <your-email>
+```
+This gives the cluster VMs **read access to that one dataset**, plus permission to run queries and use the fast BigQuery Storage API. Queries are billed to `<PROJECT_ID>`.
+
+**b. Write the query in a file** (easier than quoting SQL backticks in the shell). Start from `query_example.sql`:
+```sql
+SELECT
+  review_text AS text,
+  sentiment   AS label,
+  IF(MOD(ABS(FARM_FINGERPRINT(review_id)), 5) = 0, 'test', 'train') AS split
+FROM `my-project.reviews.movie_reviews`
+```
+
+**c. Train:**
+```bash
+sbatch --export=ALL,GCS_MODEL_URI=gs://<BUCKET_NAME>/models/sentiment-bq train.sh \
+  --bq_query_file my_query.sql --train_samples 20000 --eval_samples 2000
+```
+For a one-off, `--bq_query '...'` also works. Use **single quotes** so the shell doesn't treat the backticks as commands.
+
+**Tips**
+- BigQuery bills by **data scanned**: select only the columns you need, and filter or `TABLESAMPLE` while experimenting.
+- The whole result is loaded into memory, which is fine up to a few GB. For bigger tables, `EXPORT DATA` to Parquet in GCS and train from the files instead.
+- `--train_samples` and `--eval_samples` still cap how many rows are used (defaults 2000 and 500), so raise them for real training.
 
 **4. Deploy to Vertex AI** (laptop or Cloud Shell):
 ```bash
@@ -90,4 +125,4 @@ curl -X POST localhost:8080/predict -H 'Content-Type: application/json' -d '{"in
 - Training and serving pin the same versions (`torch 2.5.1`, `transformers 4.46.3`), so the saved model loads identically.
 - Vertex AI also needs **L4 quota for prediction** in the region. It's separate from the Compute Engine quota the Slurm cluster uses, so check **IAM & Admin → Quotas**.
 - In the same project, Vertex AI's service agent can normally read the bucket and pull the image. If deployment fails on permissions, check the deployment logs in **Vertex AI → Endpoints**.
-- Tested locally on CPU (training on a toy model and dataset, the server with Vertex AI's environment variables, and GCS upload/download against a fake bucket), but **not yet run on the cluster or Vertex AI**.
+- Tested locally on CPU (training on a toy model and dataset, including from a simulated BigQuery result; the server with Vertex AI's environment variables; GCS upload/download against a fake bucket), but **not yet run on the cluster, BigQuery or Vertex AI**.

@@ -10,6 +10,8 @@
 #   3. lets the cluster VMs' service account WRITE to that bucket only (to upload trained models)
 #   4. lets that service account push images (new projects run Cloud Build as it)
 #   5. optionally grants a deployer the roles to build, upload and deploy models
+#   6. optionally lets the cluster read ONE BigQuery dataset for training data:
+#        BQ_DATASET=my-project.reviews ./setup_vertex.sh <PROJECT_ID> <BUCKET_NAME> ...
 set -euo pipefail
 
 if [[ $# -lt 2 ]]; then
@@ -56,6 +58,32 @@ grant "$VM_SA" roles/artifactregistry.writer
 LEGACY_CB_SA="${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com"
 if gcloud iam service-accounts describe "$LEGACY_CB_SA" --project "$PROJECT_ID" >/dev/null 2>&1; then
   grant "serviceAccount:$LEGACY_CB_SA" roles/artifactregistry.writer   # older projects
+fi
+
+if [[ -n "${BQ_DATASET:-}" ]]; then
+  BQ_ID="${BQ_DATASET/./:}"                      # my-project.reviews -> my-project:reviews
+  [[ "$BQ_ID" == *:* ]] || BQ_ID="${PROJECT_ID}:${BQ_ID}"
+  SA_EMAIL="${VM_SA#serviceAccount:}"
+  echo "== BigQuery read access to dataset $BQ_ID"
+  gcloud services enable --project "$PROJECT_ID" bigquery.googleapis.com bigquerystorage.googleapis.com
+  grant "$VM_SA" roles/bigquery.jobUser           # run queries (billed to $PROJECT_ID)
+  grant "$VM_SA" roles/bigquery.readSessionUser   # fast reads via the BigQuery Storage API
+  # Dataset-level READER (= BigQuery Data Viewer on this dataset only), using the
+  # documented show -> edit access list -> update method.
+  ACCESS_JSON="$(mktemp)"
+  bq --project_id "$PROJECT_ID" show --format=prettyjson "$BQ_ID" > "$ACCESS_JSON"
+  python3 - "$ACCESS_JSON" "$SA_EMAIL" <<'PY'
+import json, sys
+path, email = sys.argv[1], sys.argv[2]
+ds = json.load(open(path))
+entry = {"role": "READER", "userByEmail": email}
+if entry not in ds.setdefault("access", []):
+    ds["access"].append(entry)
+json.dump(ds, open(path, "w"))
+PY
+  bq --project_id "$PROJECT_ID" update --source "$ACCESS_JSON" "$BQ_ID" >/dev/null
+  rm -f "$ACCESS_JSON"
+  echo "  + READER on $BQ_ID -> $SA_EMAIL"
 fi
 
 if [[ -n "$DEPLOYER" ]]; then

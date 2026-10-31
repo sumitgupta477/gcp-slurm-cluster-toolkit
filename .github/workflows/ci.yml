@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Blueprint and shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Blueprint is valid YAML with the expected modules
+        run: |
+          python3 - <<'EOF'
+          import yaml
+          bp = yaml.safe_load(open("hpc-slurm.yaml"))
+          modules = bp["deployment_groups"][0]["modules"]
+          ids = [m["id"] for m in modules]
+          for m in modules:  # every `use:` must point at a module defined earlier
+              for dep in m.get("use", []):
+                  assert dep in ids[: ids.index(m["id"])], f"{m['id']} uses unknown/later module {dep}"
+          print("modules:", ids)
+          EOF
+
+      - name: ShellCheck
+        run: shellcheck -S warning setup-permissions.sh examples/train-to-vertex/*.sh
+
+  tests:
+    name: Python tests (${{ matrix.example }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        example: [train-to-vertex, sagemaker-hf]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies (CPU-only PyTorch)
+        run: |
+          pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+          pip install transformers==4.46.3 datasets==3.1.0 accelerate==1.1.1 \
+            pytest boto3 google-cloud-bigquery google-cloud-monitoring
+
+      - name: Run tests
+        env:
+          AWS_DEFAULT_REGION: us-east-1
+        run: pytest examples/${{ matrix.example }}/tests -v -W ignore::DeprecationWarning -W ignore::FutureWarning

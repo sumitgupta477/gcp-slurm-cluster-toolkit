@@ -114,6 +114,10 @@ python train.py
 
 [`examples/train-to-vertex/`](examples/train-to-vertex/) fine-tunes a Hugging Face model on the L4 with `sbatch` (training data from the Hugging Face Hub or a BigQuery query), uploads it to Cloud Storage, and serves it from a Vertex AI endpoint through a small custom container.
 
+## Example: the same model on AWS SageMaker, with drift monitoring
+
+[`examples/sagemaker-hf/`](examples/sagemaker-hf/) trains and serves the same DistilBERT sentiment model on SageMaker (SDK v3, NVIDIA L4 `ml.g6.xlarge`), captures endpoint traffic, and scores it for drift against a baseline built during training. It publishes CloudWatch metrics and an SNS alarm, without SageMaker Model Monitor.
+
 ## Using plain Terraform instead
 
 Run `gcluster create` once, then manage the generated `hpc-slurm/` folder with normal `terraform plan` / `terraform apply`, a remote state backend and your usual CI.

@@ -1,0 +1,3 @@
+# Installed on top of the Hugging Face training container (which already has
+# torch, transformers and accelerate).
+datasets

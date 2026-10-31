@@ -10,7 +10,9 @@
 #   3. lets the cluster VMs' service account WRITE to that bucket only (to upload trained models)
 #   4. lets that service account push images (new projects run Cloud Build as it)
 #   5. optionally grants a deployer the roles to build, upload and deploy models
-#   6. optionally lets the cluster read ONE BigQuery dataset for training data:
+#   6. creates the BigQuery dataset for endpoint request-response logs (drift monitoring)
+#      and lets the cluster query it, so monitor_drift.py can also run from the cluster
+#   7. optionally lets the cluster read ONE BigQuery dataset for training data:
 #        BQ_DATASET=my-project.reviews ./setup_vertex.sh <PROJECT_ID> <BUCKET_NAME> ...
 set -euo pipefail
 
@@ -62,19 +64,15 @@ if gcloud iam service-accounts describe "$LEGACY_CB_SA" --project "$PROJECT_ID" 
   grant "serviceAccount:$LEGACY_CB_SA" roles/artifactregistry.writer   # older projects
 fi
 
-if [[ -n "${BQ_DATASET:-}" ]]; then
-  BQ_ID="${BQ_DATASET/./:}"                      # my-project.reviews -> my-project:reviews
-  [[ "$BQ_ID" == *:* ]] || BQ_ID="${PROJECT_ID}:${BQ_ID}"
-  SA_EMAIL="${VM_SA#serviceAccount:}"
-  echo "== BigQuery read access to dataset $BQ_ID"
-  gcloud services enable --project "$PROJECT_ID" bigquery.googleapis.com bigquerystorage.googleapis.com
-  grant "$VM_SA" roles/bigquery.jobUser           # run queries (billed to $PROJECT_ID)
-  grant "$VM_SA" roles/bigquery.readSessionUser   # fast reads via the BigQuery Storage API
+SA_EMAIL="${VM_SA#serviceAccount:}"
+
+grant_dataset_reader() {  # grant_dataset_reader <project:dataset>
   # Dataset-level READER (= BigQuery Data Viewer on this dataset only), using the
   # documented show -> edit access list -> update method.
-  ACCESS_JSON="$(mktemp)"
-  bq --project_id "$PROJECT_ID" show --format=prettyjson "$BQ_ID" > "$ACCESS_JSON"
-  python3 - "$ACCESS_JSON" "$SA_EMAIL" <<'PY'
+  local access_json
+  access_json="$(mktemp)"
+  bq --project_id "$PROJECT_ID" show --format=prettyjson "$1" > "$access_json"
+  python3 - "$access_json" "$SA_EMAIL" <<'PY'
 import json, sys
 path, email = sys.argv[1], sys.argv[2]
 ds = json.load(open(path))
@@ -83,9 +81,29 @@ if entry not in ds.setdefault("access", []):
     ds["access"].append(entry)
 json.dump(ds, open(path, "w"))
 PY
-  bq --project_id "$PROJECT_ID" update --source "$ACCESS_JSON" "$BQ_ID" >/dev/null
-  rm -f "$ACCESS_JSON"
-  echo "  + READER on $BQ_ID -> $SA_EMAIL"
+  bq --project_id "$PROJECT_ID" update --source "$access_json" "$1" >/dev/null
+  rm -f "$access_json"
+  echo "  + READER on $1 -> $SA_EMAIL"
+}
+
+echo "== BigQuery"
+gcloud services enable --project "$PROJECT_ID" bigquery.googleapis.com bigquerystorage.googleapis.com
+grant "$VM_SA" roles/bigquery.jobUser             # run queries (billed to $PROJECT_ID)
+grant "$VM_SA" roles/bigquery.readSessionUser     # fast reads via the BigQuery Storage API
+
+LOG_DATASET="${LOG_DATASET:-vertex_logging}"
+echo "== Request-response log dataset ${PROJECT_ID}:${LOG_DATASET} (drift monitoring)"
+if ! bq --project_id "$PROJECT_ID" show "${PROJECT_ID}:${LOG_DATASET}" >/dev/null 2>&1; then
+  bq --project_id "$PROJECT_ID" mk --dataset --location "$REGION" \
+    --description "Vertex AI endpoint request-response logs" "${PROJECT_ID}:${LOG_DATASET}"
+fi
+grant_dataset_reader "${PROJECT_ID}:${LOG_DATASET}"
+
+if [[ -n "${BQ_DATASET:-}" ]]; then
+  BQ_ID="${BQ_DATASET/./:}"                      # my-project.reviews -> my-project:reviews
+  [[ "$BQ_ID" == *:* ]] || BQ_ID="${PROJECT_ID}:${BQ_ID}"
+  echo "== BigQuery read access to training dataset $BQ_ID"
+  grant_dataset_reader "$BQ_ID"
 fi
 
 if [[ -n "$DEPLOYER" ]]; then
@@ -93,6 +111,9 @@ if [[ -n "$DEPLOYER" ]]; then
   grant "user:$DEPLOYER" roles/aiplatform.user               # upload models, create/deploy endpoints
   grant "user:$DEPLOYER" roles/cloudbuild.builds.editor      # build the serving image
   grant "user:$DEPLOYER" roles/artifactregistry.writer       # push images
+  grant "user:$DEPLOYER" roles/bigquery.jobUser              # run monitor_drift.py
+  grant "user:$DEPLOYER" roles/bigquery.dataViewer           # read request-response logs
+  grant "user:$DEPLOYER" roles/monitoring.metricWriter       # monitor_drift.py --publish-metrics
 fi
 
 echo

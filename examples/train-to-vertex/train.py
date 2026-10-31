@@ -11,6 +11,10 @@ With --register, the uploaded model is also added to the Vertex AI Model Registr
 NEW VERSION of one model (created on the first run), optionally only if accuracy is good
 enough (--min_accuracy). Registering does not serve it; deploy a version later.
 
+Every run also saves drift_baseline.json in the model folder: what normal inputs and
+predictions look like for THIS model (held-out reviews + its own predictions). It travels
+with the model to Cloud Storage and the registry; monitor_drift.py compares live traffic to it.
+
     python train.py --output_dir ~/models/sentiment-v1 --gcs_uri gs://BUCKET/models/sentiment-v1
     python train.py --output_dir ~/models/run-7 --gcs_uri gs://BUCKET/models/run-7 \\
         --register --serving_image REGION-docker.pkg.dev/PROJECT/serving/hf-sentiment-server:latest
@@ -33,6 +37,7 @@ from transformers import (
     TrainingArguments,
 )
 
+import drift  # same folder; shared with monitor_drift.py
 
 def parse_args():
     p = argparse.ArgumentParser()
@@ -191,6 +196,7 @@ def main():
         data = load_dataset(args.dataset)
     train_ds = data["train"].shuffle(seed=42).select(range(min(args.train_samples, len(data["train"]))))
     eval_ds = data["test"].shuffle(seed=42).select(range(min(args.eval_samples, len(data["test"]))))
+    eval_texts = list(eval_ds["text"])
 
     # 2. Tokenize: text -> numbers
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
@@ -243,6 +249,16 @@ def main():
     tokenizer.save_pretrained(str(output_dir))
     (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
     print(f"Model saved to {output_dir}")
+
+    # 5b. Drift baseline: held-out reviews + this model's own predictions and confidence
+    probs = torch.softmax(torch.tensor(trainer.predict(eval_ds).predictions), dim=-1).numpy()
+    id2label = trainer.model.config.id2label
+    rows = [drift.features(t, id2label[int(p.argmax())], float(p.max())) for t, p in zip(eval_texts, probs)]
+    baseline = drift.build_baseline(rows, source=f"Slurm job {os.environ.get('SLURM_JOB_ID', 'local')}")
+    baseline["eval_accuracy"] = metrics.get("eval_accuracy")
+    (output_dir / "drift_baseline.json").write_text(json.dumps(baseline, indent=2))
+    print(f"Drift baseline: {len(rows)} held-out predictions, "
+          f"{baseline['features']['pred_positive']['mean']:.1%} predicted POSITIVE")
 
     # 6. Optional: upload to Cloud Storage for Vertex AI
     if args.gcs_uri:

@@ -56,6 +56,8 @@ Options: `--skip-deploy`, `--epochs`, `--train-samples`, `--capture-percent`, `-
 
 **Scoring:** each feature is binned like the baseline and compared with the **Population Stability Index (PSI)**: below 0.1 no meaningful change, 0.1–0.2 moderate, 0.2 or more significant. Values outside the range seen in training get their own bins, so they always register.
 
+PSI alone is noisy on small samples. In simulations of unchanged traffic, a fixed PSI threshold raised false alarms most of the time with small baselines. So a feature only counts when its shift is also **statistically significant** (a chi-square test on the binned counts, at 1% overall, Bonferroni-corrected across features). The **drift score** is the highest PSI among significant features, and 0 when none are. With this, the same simulations gave about 1% false alarms or less from 30 samples upward, while clear shifts were still caught every time.
+
 **Check drift** (after some traffic has reached the endpoint):
 
 ```bash
@@ -63,18 +65,18 @@ python monitor_drift.py --endpoint hf-sentiment-<stamp> --region us-east-1
 ```
 ```text
 Endpoint hf-sentiment-<stamp>: significant (412 samples, last 24h)
-feature                       PSI  baseline mean  live mean
-confidence                  1.842          0.931      0.611  <-- drift
-pred_positive               0.733          0.502      0.087  <-- drift
-input_non_ascii_ratio       0.412          0.001      0.024  <-- drift
+feature                      PSI   p-value  baseline mean  live mean
+confidence                 1.842   4.1e-61          0.931      0.611  <-- drift
+pred_positive              0.733   2.9e-29          0.502      0.087  <-- drift
+input_non_ascii_ratio      0.412   7.7e-15          0.001      0.024  <-- drift
 ...
 ```
 (The output above is illustrative.)
 
-- `--publish-metrics`: CloudWatch namespace `HFSentiment/ModelDrift`, with `MaxPSI` and `SampleCount` per endpoint plus `PSI` per feature
+- `--publish-metrics`: CloudWatch namespace `HFSentiment/ModelDrift`, with `DriftScore` and `SampleCount` per endpoint plus `PSI` per feature
 - `--save-report`: JSON report to `s3://<bucket>/hf-sentiment/monitoring/reports/<endpoint>/YYYY/MM/DD/HH.json`
-- `--create-alarm --sns-topic-arn <arn>`: alarm on `MaxPSI ≥ --threshold` (default 0.2) that notifies the topic
-- `--hours`, `--min-samples`: analysis window (default 24h) and minimum predictions before scoring (default 30, so a quiet endpoint never raises a false alarm)
+- `--create-alarm --sns-topic-arn <arn>`: alarm on `DriftScore ≥ --threshold` (default 0.2) that notifies the topic
+- `--hours`, `--min-samples`: analysis window (default 24h) and minimum predictions before scoring (default 30)
 - **Exit code 2** on significant drift, for cron jobs and CI
 
 **Run it on a schedule:** it only needs `boto3`, so an hourly cron job or an EventBridge-scheduled Lambda both work. [ModelTrainingSagemaker](https://github.com/sumitgupta477/ModelTrainingSagemaker) shows the fully event-driven version in Terraform: a baseline Lambda on training completion, an hourly drift-check Lambda, and CloudWatch alarms to SNS.
@@ -85,7 +87,7 @@ input_non_ascii_ratio       0.412          0.001      0.024  <-- drift
 pip install pytest boto3 torch transformers datasets accelerate
 pytest examples/sagemaker-hf/tests
 ```
-Covers feature extraction, both data-capture encodings (JSON and base64), single and batched requests, the scoring rules (including values outside the training range), the monitor end to end against in-memory S3 and CloudWatch fakes, and a **real tiny training run** that checks `train.py` writes a correct baseline.
+Covers feature extraction, both data-capture encodings (JSON and base64), single and batched requests, the scoring rules (values outside the training range, chi-square accuracy, and a false-alarm and detection check over many random samples), the monitor end to end against in-memory S3 and CloudWatch fakes, and a **real tiny training run** that checks `train.py` writes a correct baseline.
 
 ## Notes
 

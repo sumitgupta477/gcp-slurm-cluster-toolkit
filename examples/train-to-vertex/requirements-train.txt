@@ -9,3 +9,5 @@ google-cloud-storage
 google-cloud-bigquery[bqstorage,pandas]
 # Vertex AI Model Registry (--register)
 google-cloud-aiplatform
+# Drift monitoring (monitor_drift.py --publish-metrics), so it can also run from the cluster
+google-cloud-monitoring

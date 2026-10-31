@@ -11,6 +11,7 @@
 #      ./deploy_vertex.sh <PROJECT_ID> <GCS_MODEL_URI>
 #
 # Region: us-central1, or set REGION=... in the environment.
+# Request-response logging: BigQuery dataset LOG_DATASET (default vertex_logging), rate LOG_RATE (default 1.0).
 #
 # COST: the endpoint keeps one g2-standard-8 + L4 running (and billing) until you run
 #       ./cleanup_vertex.sh. Deploying usually takes 10-20 minutes.
@@ -61,8 +62,14 @@ else
 fi
 echo "   model: $MODEL_REF"
 
-echo "== Creating an endpoint and deploying (slowest step)"
-gcloud ai endpoints create --region "$REGION" --display-name "$NAME-endpoint"
+echo "== Creating an endpoint (logging requests/responses to BigQuery) and deploying (slowest step)"
+# Every request and response is logged to BigQuery for drift monitoring (monitor_drift.py).
+# The dataset is created by setup_vertex.sh; Vertex AI creates the table.
+LOG_TABLE="bq://${PROJECT_ID}.${LOG_DATASET:-vertex_logging}.${NAME//-/_}"
+gcloud ai endpoints create --region "$REGION" --display-name "$NAME-endpoint" \
+  --request-response-logging-rate "${LOG_RATE:-1.0}" \
+  --request-response-logging-table "$LOG_TABLE"
+echo "   request-response logs: $LOG_TABLE"
 ENDPOINT_ID="$(gcloud ai endpoints list --region "$REGION" --filter="displayName=$NAME-endpoint" \
   --format='value(name.basename())' --limit 1)"
 echo "   endpoint ID: $ENDPOINT_ID"
@@ -91,3 +98,4 @@ DELETE_MODEL=$([[ "${DISPLAY_NAME:-}" ]] && echo no || echo yes)
 EOF
 echo
 echo "Endpoint $ENDPOINT_ID is LIVE and billing. When finished:  ./cleanup_vertex.sh"
+echo "Check drift once it has traffic:  python monitor_drift.py --project $PROJECT_ID --region $REGION --endpoint-id $ENDPOINT_ID"

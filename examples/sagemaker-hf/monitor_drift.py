@@ -4,6 +4,8 @@ Reads the endpoint's captured traffic from the last --hours hours
 (s3://<bucket>/<prefix>/datacapture/<endpoint>/AllTraffic/YYYY/MM/DD/HH/*.jsonl),
 computes the same features as training (train/drift.py), and scores each feature with
 the Population Stability Index (PSI): < 0.1 none, 0.1-0.2 moderate, >= 0.2 significant.
+A feature only counts if its shift is also statistically significant (chi-square test,
+Bonferroni-corrected); DriftScore is the highest PSI among those features (0 if none).
 
     python monitor_drift.py --endpoint hf-sentiment-20261030-120000
     python monitor_drift.py --endpoint ... --publish-metrics --save-report
@@ -33,11 +35,11 @@ def parse_args(argv=None):
     p.add_argument("--variant", default="AllTraffic")
     p.add_argument("--hours", type=int, default=24, help="How much recent traffic to analyse")
     p.add_argument("--min-samples", type=int, default=30, help="Minimum captured predictions to score drift")
-    p.add_argument("--publish-metrics", action="store_true", help=f"Publish MaxPSI/SampleCount/PSI to CloudWatch ({NAMESPACE})")
+    p.add_argument("--publish-metrics", action="store_true", help=f"Publish DriftScore/SampleCount/PSI to CloudWatch ({NAMESPACE})")
     p.add_argument("--save-report", action="store_true", help="Write the JSON report to s3://<bucket>/<prefix>/monitoring/reports/")
-    p.add_argument("--create-alarm", action="store_true", help="Create/update a CloudWatch alarm on MaxPSI")
+    p.add_argument("--create-alarm", action="store_true", help="Create/update a CloudWatch alarm on DriftScore")
     p.add_argument("--sns-topic-arn", help="SNS topic the alarm notifies (with --create-alarm)")
-    p.add_argument("--threshold", type=float, default=0.2, help="Alarm threshold on MaxPSI")
+    p.add_argument("--threshold", type=float, default=0.2, help="Alarm threshold on DriftScore")
     args = p.parse_args(argv)
     if args.create_alarm and not args.sns_topic_arn:
         p.error("--create-alarm needs --sns-topic-arn")
@@ -83,10 +85,9 @@ def check(args, s3, cloudwatch=None, now=None) -> dict:
         report["status"] = "insufficient_data"
     else:
         feats = drift.compare(baseline, rows)
-        worst = max(feats, key=lambda f: feats[f]["psi"])
-        report.update(status=drift.severity(feats[worst]["psi"]), max_psi=feats[worst]["psi"],
-                      max_psi_feature=worst, features=feats)
-        metrics.append({"MetricName": "MaxPSI", "Dimensions": dim, "Value": feats[worst]["psi"], "Unit": "None"})
+        score, feature = drift.drift_score(feats)
+        report.update(status=drift.severity(score), drift_score=score, drift_feature=feature, features=feats)
+        metrics.append({"MetricName": "DriftScore", "Dimensions": dim, "Value": score, "Unit": "None"})
         metrics.extend({"MetricName": "PSI", "Dimensions": dim + [{"Name": "Feature", "Value": n}],
                         "Value": s["psi"], "Unit": "None"} for n, s in feats.items())
 
@@ -103,8 +104,9 @@ def check(args, s3, cloudwatch=None, now=None) -> dict:
 def create_alarm(cloudwatch, args):
     cloudwatch.put_metric_alarm(
         AlarmName=f"{args.endpoint}-model-drift",
-        AlarmDescription=f"Live traffic on {args.endpoint} drifted from the training baseline (max PSI).",
-        Namespace=NAMESPACE, MetricName="MaxPSI",
+        AlarmDescription=f"Live traffic on {args.endpoint} drifted from the training baseline "
+                         "(highest PSI among statistically significant features).",
+        Namespace=NAMESPACE, MetricName="DriftScore",
         Dimensions=[{"Name": "Endpoint", "Value": args.endpoint}],
         Statistic="Maximum", Period=3600, EvaluationPeriods=1,
         Threshold=args.threshold, ComparisonOperator="GreaterThanOrEqualToThreshold",
@@ -113,13 +115,14 @@ def create_alarm(cloudwatch, args):
 
 
 def print_report(report):
-    print(f"Endpoint {report.get('endpoint')}: {report['status']} "
+    print(f"Endpoint {report.get('endpoint') or report.get('endpoint_id')}: {report['status']} "
           f"({report.get('samples', 0)} samples, last {report.get('window_hours')}h)")
     if "features" in report:
-        print(f"{'feature':24} {'PSI':>8} {'baseline mean':>14} {'live mean':>10}")
+        print(f"{'feature':24} {'PSI':>7} {'p-value':>9} {'baseline mean':>14} {'live mean':>10}")
         for name, s in sorted(report["features"].items(), key=lambda kv: -kv[1]["psi"]):
-            flag = {"significant": "  <-- drift", "moderate": "  <-- watch"}.get(drift.severity(s["psi"]), "")
-            print(f"{name:24} {s['psi']:8.3f} {s['baseline_mean']:14.3f} {s['live_mean']:10.3f}{flag}")
+            level = drift.severity(s["psi"]) if s["significant"] else "none"
+            flag = {"significant": "  <-- drift", "moderate": "  <-- watch"}.get(level, "")
+            print(f"{name:24} {s['psi']:7.3f} {s['p_value']:9.2g} {s['baseline_mean']:14.3f} {s['live_mean']:10.3f}{flag}")
     if report.get("detail"):
         print(report["detail"])
     if report.get("report"):

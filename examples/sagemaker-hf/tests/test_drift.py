@@ -140,6 +140,39 @@ def test_values_outside_training_range_count_as_drift():
     assert same == pytest.approx(0) and longer >= 0.2 and shorter >= 0.2
 
 
+def test_chi2_sf_matches_known_critical_values():
+    assert drift.chi2_sf(3.841, 1) == pytest.approx(0.05, abs=1e-3)
+    assert drift.chi2_sf(11.070, 5) == pytest.approx(0.05, abs=1e-3)
+    assert drift.chi2_sf(23.209, 10) == pytest.approx(0.01, abs=1e-3)
+
+
+def _sample(rnd, n, shift=False):
+    rows = []
+    for _ in range(n):
+        pos = rnd.random() < (0.1 if shift else 0.5)
+        words = rnd.randint(80, 200) if shift else rnd.randint(5, 60)
+        conf = rnd.uniform(0.5, 0.75) if shift else min(0.999, rnd.betavariate(8, 1.2))
+        rows.append(drift.features("word " * words, "POSITIVE" if pos else "NEGATIVE", conf))
+    return rows
+
+
+def test_low_false_alarm_rate_and_high_detection():
+    # Unchanged traffic, small and large samples, small and large baselines: almost never flagged.
+    alarms = 0
+    for seed in range(60):
+        rnd = random.Random(seed)
+        base = drift.build_baseline(_sample(rnd, rnd.choice([60, 500])))
+        score, _ = drift.drift_score(drift.compare(base, _sample(rnd, rnd.choice([30, 100, 200]))))
+        alarms += score >= 0.2
+    assert alarms <= 2, alarms
+    # Shifted traffic (labels, length and confidence all move) is flagged even with 30 samples.
+    for seed in range(20):
+        rnd = random.Random(1000 + seed)
+        base = drift.build_baseline(_sample(rnd, 60))
+        score, feature = drift.drift_score(drift.compare(base, _sample(rnd, 30, shift=True)))
+        assert score >= 0.2 and feature is not None
+
+
 # --------------------------------------------------------------------------- monitor_drift.py
 def setup_s3():
     s3 = FakeS3()
@@ -183,16 +216,16 @@ def test_monitor_detects_prediction_and_input_drift():
     text = "Ich möchte mein Geld zurück, Bestellung 48213 kam kaputt an!! " * 3
     put_capture(s3, [capture_line([text], [{"label": "NEGATIVE", "score": 0.55}])] * 60)
     rep = monitor_drift.check(args_for(), s3, cw)
-    assert rep["status"] == "significant" and rep["max_psi"] >= 0.2
+    assert rep["status"] == "significant" and rep["drift_score"] >= 0.2
     for f in ("pred_positive", "confidence", "input_words", "input_non_ascii_ratio"):
-        assert rep["features"][f]["psi"] >= 0.2, f
+        assert rep["features"][f]["psi"] >= 0.2 and rep["features"][f]["significant"], f
 
 
 def test_monitor_alarm_and_exit_code(monkeypatch, capsys):
     cw = FakeCloudWatch()
     monitor_drift.create_alarm(cw, args_for(create_alarm=True, sns_topic_arn="arn:aws:sns:us-east-1:1:alerts"))
     alarm = cw.alarms[0]
-    assert alarm["MetricName"] == "MaxPSI" and alarm["Threshold"] == 0.2
+    assert alarm["MetricName"] == "DriftScore" and alarm["Threshold"] == 0.2
     assert alarm["AlarmActions"] == ["arn:aws:sns:us-east-1:1:alerts"] and alarm["TreatMissingData"] == "notBreaching"
 
     s3 = setup_s3()

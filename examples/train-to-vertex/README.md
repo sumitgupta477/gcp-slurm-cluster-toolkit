@@ -23,6 +23,8 @@ flowchart LR
 | `serving/` | Vertex AI | Dockerfile + FastAPI server that loads the model from `AIP_STORAGE_URI` |
 | `build_image.sh` | Laptop / Cloud Shell | Builds and pushes the serving image (needed once for `--register`) |
 | `deploy_vertex.sh` | Laptop / Cloud Shell | Deploys a **registered model version**, or registers + deploys straight from GCS, then tests it |
+| `drift.py` | — | Shared drift code: text features and scoring (plain Python), used by training and the monitor |
+| `monitor_drift.py` | Laptop / Cloud Shell / cluster | Scores the endpoint's logged traffic against the deployed model's baseline |
 | `cleanup_vertex.sh` | Laptop / Cloud Shell | Undeploys and deletes the endpoint and model (stops billing) |
 
 ## Steps
@@ -145,6 +147,53 @@ Test it locally without Vertex AI (needs `pip install -r serving/requirements.tx
 cd serving && AIP_STORAGE_URI=~/models/<your-model-folder> uvicorn server:app --port 8080
 curl -X POST localhost:8080/predict -H 'Content-Type: application/json' -d '{"instances": ["great film"]}'
 ```
+
+## Drift monitoring
+
+Is live traffic still like what the model was trained on? Each training run saves **`drift_baseline.json`** in the model folder: the held-out reviews plus **the model's own predictions and confidence**. It travels with the model to Cloud Storage and the Model Registry, so **every version carries its own definition of "normal"**. `deploy_vertex.sh` turns on **request-response logging**: Vertex AI writes every request and prediction to BigQuery (dataset `vertex_logging`, created by `setup_vertex.sh`).
+
+```mermaid
+flowchart LR
+    tr["sbatch train.sh"] -->|"model + drift_baseline.json"| gcs[("gs://…/models/run-N/")]
+    gcs --> ep["Vertex AI endpoint"]
+    app["Requests"] --> ep
+    ep -->|request-response logging| bq[("BigQuery<br/>vertex_logging")]
+    bq --> mon["monitor_drift.py"]
+    gcs --> mon
+    mon --> cm["Cloud Monitoring metrics<br/>+ alert policy"]
+```
+
+**Check drift** (after the endpoint has had some traffic):
+```bash
+pip install google-cloud-aiplatform google-cloud-bigquery google-cloud-storage google-cloud-monitoring
+python monitor_drift.py --project <PROJECT_ID> --endpoint-id <ENDPOINT_ID>
+```
+It finds the BigQuery log table from the endpoint's settings and the baseline from the deployed model version's folder, reads the last 24 hours (`--hours`), and prints a per-feature table (PSI, p-value, baseline vs live mean). **Exit code 2** means significant drift.
+
+**What is measured:** text length (words, characters), share of non-ASCII characters and digits, `!` count, questions, **share of POSITIVE predictions**, and **model confidence**. A drop in confidence is often the earliest sign that the model no longer fits the data.
+
+**How it's scored:** each feature is compared with the **Population Stability Index (PSI)**: below 0.1 no change, 0.1–0.2 moderate, 0.2 or more significant. A feature only counts when its shift is also **statistically significant** (chi-square test, Bonferroni-corrected at 1%), because PSI alone is noisy on small samples. In simulations of unchanged traffic, this kept false alarms at about 1% or less from 30 samples upward, while clear shifts were still caught every time.
+
+**Alerts and history:**
+```bash
+# Publish custom metrics (custom.googleapis.com/model_drift/drift_score, sample_count, psi by feature)
+python monitor_drift.py --project <PROJECT_ID> --endpoint-id <ENDPOINT_ID> --publish-metrics \
+  --save-report gs://<BUCKET_NAME>/monitoring/reports
+
+# One-time: alert when the drift score reaches 0.2 (notification channel ID from Monitoring > Alerting)
+python monitor_drift.py --project <PROJECT_ID> --endpoint-id <ENDPOINT_ID> --print-alert-policy <CHANNEL_ID> > drift-policy.json
+gcloud monitoring policies create --policy-from-file drift-policy.json
+```
+
+**Run it every hour:** the cluster's service account can already query the log dataset and write metrics (`setup_vertex.sh`), so the cluster can run it. For example, with `crontab -e` on the login VM:
+```
+0 * * * * cd ~/gcp-slurm-cluster-toolkit/examples/train-to-vertex && ~/venv-train/bin/python monitor_drift.py --project <PROJECT_ID> --endpoint-id <ENDPOINT_ID> --publish-metrics >> ~/drift.log 2>&1
+```
+Cloud Scheduler with a Cloud Run job also works, if you don't want the cluster running.
+
+**Why not Vertex AI Model Monitoring?** It's built around tabular feature columns. This model takes free text, so the features (length, language signals, predicted label, confidence) are computed here, and the results go into Cloud Monitoring the same way.
+
+**Notes:** `monitor_drift.py` reads the standard request-response logging columns (`logging_time`, `request_payload`, `response_payload`). If your table differs, use `--time-column`, `--request-column` and `--response-column`. BigQuery bills the drift query by data scanned, so add a table expiration or partition expiry to keep the log table small. Tested with in-memory BigQuery, Cloud Storage and Cloud Monitoring fakes, plus a real tiny training run (`pytest examples/train-to-vertex/tests`); not yet run against Vertex AI.
 
 ## Costs
 
